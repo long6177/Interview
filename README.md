@@ -11,6 +11,7 @@
 | 🌐 [计算机网络](network/PROGRESS.md)   | [小林coding](https://xiaolincoding.com/interview/network.html)                                                           |
 | 🗄️ [MySQL](mysql/PROGRESS.md)    | [小林coding](https://xiaolincoding.com/interview/mysql.html)                                                             |
 | ☕ [Java（基础+集合）](java/PROGRESS.md) | [小林coding](https://xiaolincoding.com/interview/java.html) · [集合](https://xiaolincoding.com/interview/collections.html) |
+| 🤖 [Agent（Agent+RAG）](agent/PROGRESS.md) | [小林coding](https://xiaolincoding.com/project/xiaolinnote.html)                                                    |
 
 ## 进度追踪
 
