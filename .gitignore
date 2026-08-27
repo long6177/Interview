@@ -14,3 +14,6 @@ Thumbs.db
 # 忽略 Python 缓存
 __pycache__/
 *.pyc
+
+# AI Agent 产出
+.workbuddy/
