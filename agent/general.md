@@ -123,3 +123,119 @@ flowchart LR
 1. 点出"Skill 是**上下文工程（Context Engineering）**的实践"——装几十个 skill 但上下文不膨胀，靠的就是渐进式公开。
 2. 强调"效果要用**测试集度量**，而不是靠感觉"——体现工程化闭环思维。
 3. 讲一个真实踩坑故事最加分，例如："最初 description 写得太含糊，Agent 频繁误触发；改成明确的正向+负向触发条件后，误触发率大幅下降，测试集首轮成功率从 60% 提到 90%。"
+
+## 3. 目前关于 LLM 的 API 服务网络请求上游格式你了解多少, Response API, ChatCompletion, Anthropic Messages你都知道吗?
+
+**一句话总览**
+
+> 这三个不是平行概念：**Chat Completions 和 Responses API 是 OpenAI 的"新老两代"接口**（前者 2023 年推出、已成行业事实标准；后者 2025 年推出、是面向 Agent 的新一代统一接口），**Anthropic Messages API 是 Claude 的原生接口**（设计更严格、结构更清晰）。三者都是"发一段对话历史 + 参数 → 收到回复"的 JSON-over-HTTP 协议，但**请求字段、消息模型、工具调用表示、流式事件格式都不一样**。
+
+**演进脉络（为什么会有三个格式）**
+
+```mermaid
+flowchart LR
+    A["Completions API (2022)<br/>prompt 字符串进 / 文本出"] --> B["Chat Completions (2023.3)<br/>messages 数组 + function calling<br/>行业事实标准"]
+    B -->|"OpenAI 新路线"| C["Responses API (2025.3)<br/>input/output + 内置工具 + 状态<br/>Agent 化统一接口"]
+    D["Anthropic Messages API (2023)<br/>顶层 system + content 块数组<br/>与 OpenAI 并行发展"] -.->|"两套生态共存"| B
+```
+
+**演进原因**：Chat Completions 一个回合只能返回"一段文本 + 一组工具调用"，做 Agent 需要开发者自己写循环（调 LLM → 执行工具 → 再调 LLM）；Responses API 把"推理、函数调用、执行结果、最终回答"作为**类型化输出项（output items）**一次性返回，并内置 web_search / code_interpreter / file_search / computer use / 远程 MCP 等工具，官方从 2025 年起推荐所有新项目使用。**Chat Completions 未废弃、仍全量支持**，但已进入"维护模式"——新功能只在 Responses 上首发；Assistants API 则计划 2026 年年中官宣废弃。
+
+**三大接口逐个说**
+
+### ① Chat Completions（OpenAI 经典接口，事实标准）
+
+```json
+// POST /v1/chat/completions
+{
+  "model": "gpt-4o",
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "北京今天几度？" }
+  ]
+}
+// 响应
+{ "choices": [ { "message": { "role": "assistant", "content": "..." }, "finish_reason": "stop" } ] }
+```
+
+- **消息模型**：`messages[]`，角色 `system / user / assistant / tool`，system 提示词就是数组里的一条消息
+- **工具调用**：assistant 消息带顶层 `tool_calls`（`function.arguments` 是 **JSON 字符串**）；工具结果用 `role: "tool"` + `tool_call_id` 回传
+- **支持 n 个候选**：`n > 1` 时 `choices[]` 有多个独立回复
+- **最大价值**：兼容生态最广——OpenRouter、vLLM、Ollama、Groq、LiteLLM 等全部实现了它，是开源模型训练/推理的事实格式
+
+### ② Responses API（OpenAI 新一代统一接口）
+
+```json
+// POST /v1/responses
+{
+  "model": "gpt-5",
+  "instructions": "You are a helpful assistant.",   // system 指令提到顶层
+  "input": "北京今天几度？",                          // 字符串或 item 数组
+  "tools": [{ "type": "web_search" }],               // 内置工具
+  "store": true                                      // 服务端状态
+}
+// 响应
+{ "output": [
+  { "type": "message", "content": [{ "type": "output_text", "text": "..." }] },
+  { "type": "function_call", ... }
+] }
+```
+
+- **消息模型**：`input`（字符串或 item 数组）+ 顶层 `instructions`；输出是**类型化 `output[]`**：`message` / `reasoning`（思维链摘要）/ `function_call` / `function_call_output`
+- **Agent 原生**：一个请求内可多次调工具；支持 `previous_response_id` / `store: true` / Conversations API 做**服务端会话状态**，不用客户端每次带全量历史
+- **内置工具 + MCP**：web_search、code_interpreter、file_search、computer use、image_generation、**远程 MCP server**（`{"type": "mcp", "server_url": ...}`）
+- **推理控制**：`reasoning.effort`（low/medium/high）；移除了 `n` 参数
+
+### ③ Anthropic Messages API（Claude 原生）
+
+```json
+// POST /v1/messages
+{
+  "model": "claude-sonnet-4",
+  "system": "You are a helpful assistant.",   // system 是顶层独立字段
+  "messages": [{ "role": "user", "content": [{ "type": "text", "text": "北京今天几度？" }] }],
+  "max_tokens": 1024                           // 必填
+}
+// 响应
+{ "content": [
+  { "type": "text", "text": "..." },
+  { "type": "tool_use", "id": "toolu_01A", "name": "get_weather", "input": { "city": "北京" } }
+], "stop_reason": "end_turn" }
+```
+
+- **设计更严格**：`messages` 只有 `user / assistant` 且**严格交替、第一条必须是 user**；`content` 统一是**内容块数组**（`text` / `image` / `tool_use` / `tool_result` / `thinking`）
+- **工具调用即内容块**：模型要调工具就输出一个 `tool_use` 块，参数 `input` 是**已解析的 JSON 对象**（不是字符串）；工具结果用 user 消息里的 `tool_result` 块回传（引用 `tool_use_id`）
+- **原生 thinking**：Extended Thinking 输出 `thinking` 块
+- **认证**：`x-api-key` + `anthropic-version` 头（OpenAI 是 `Authorization: Bearer`）
+
+**核心对比表（面试重点）**
+
+| 维度 | Chat Completions | Responses API | Anthropic Messages |
+|---|---|---|---|
+| 端点 | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` |
+| 发布 | 2023.3 | 2025.3 | 2023 |
+| 输入字段 | `messages[]` | `input` + 顶层 `instructions` | `system` + `messages[]` |
+| system 位置 | messages 里的 role | 顶层 instructions | 顶层 system 字段 |
+| 消息角色 | system/user/assistant/tool | item 体系（含 developer） | 仅 user/assistant（严格交替） |
+| 输出结构 | `choices[].message` | 类型化 `output[]`（message/reasoning/function_call） | 顶层 `content[]` 块数组 |
+| content 格式 | 字符串（多模态才用数组） | 字符串或 item 数组 | **永远是块数组**（有 type） |
+| 工具调用 | `message.tool_calls`（arguments 是 JSON 字符串） | `function_call` item | `tool_use` 内容块（input 是对象） |
+| 工具结果 | `role:"tool"` + `tool_call_id` | `function_call_output` item | user 消息内 `tool_result` 块 |
+| 结束原因 | `finish_reason`（stop/length/tool_calls） | — | `stop_reason`（end_turn/max_tokens/tool_use） |
+| 多候选 | 支持（n 参数） | 不支持（单 generation） | 不支持 |
+| 会话状态 | 无状态，客户端管历史 | `store:true` / `previous_response_id` / Conversations | 无状态，客户端管历史 |
+| 内置工具 | 无 | web_search/file_search/code_interpreter/computer use/MCP | 无（需外部接入） |
+| 流式事件 | `choices[0].delta`（文本增量） | `response.output_text.delta` / `response.completed` | `content_block_start/delta/stop`、`message_delta` |
+| 认证 | `Authorization: Bearer` | 同左 | `x-api-key` + `anthropic-version` |
+| token 字段 | prompt/completion/total_tokens | 类似（含 cached 明细） | input/output/cache_read 等 |
+| 定位 | 维护模式的事实标准 | 新项目官方推荐 | Claude 原生、生态独立 |
+
+**面试加分点（谈深度的地方）**
+
+1. **两个"数组"设计哲学完全不同**：Chat Completions 的 `choices[]` 是"多个平行世界的回答"（支持 n 参数、互相独立）；Anthropic 的 `content[]` 是"一个回答的多个组成零件"（文本 + 工具调用 + 思考块有序组合）。这是最容易看出你是否真懂 wire format 的点。
+2. **工具调用是三大格式差异最尖锐的地方**：OpenAI 把参数序列化成**字符串**（`arguments: "{\"city\":\"北京\"}"`，要 `JSON.parse`）；Anthropic 直接给**对象**（`input: {"city":"北京"}`）；Responses 用 `function_call` item 统一表达。做统一网关/代理时（如 LiteLLM、OpenRouter、自研格式转换层）主要工作量就在这。
+3. **流式（SSE）格式不兼容**：Chat Completions 增量在 `choices[0].delta.content`；Anthropic 是 `content_block_delta` 事件、且分 start/delta/stop 三段生命周期；Responses 是 `response.output_text.delta`。只改 endpoint 不改流式解析，一定会踩坑。
+4. **当前工程建议**：新项目用 Responses API（官方推荐、功能全）；已有稳定项目没必要急着迁移 Chat Completions（未废弃、兼容生态最好）；要接 Claude 就用 Messages 原生格式，不要硬转成 OpenAI 格式（会丢 thinking、prefill 等能力）。多模型接入用兼容层（LiteLLM/OpenRouter）统一，但要注意它们默认按 Chat Completions 格式做归一。
+5. **"上游格式"的工程含义**：LLM 应用中"上游"就是这层 wire format——它的设计决定了你的 Agent 循环怎么写（Responses 帮你省掉手写循环）、上下文怎么传（状态化 vs 无状态）、工具调用怎么解析（字符串 vs 对象）。面试时能讲清这点，就比只背 endpoint 强得多。
+
+## 4. 关于 SSE 你了解多少? LLM 请求服务中的SSE呢?
