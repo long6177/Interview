@@ -145,17 +145,147 @@ flowchart LR
 
 ### ① Chat Completions（OpenAI 经典接口，事实标准）
 
+**1) 最简请求与完整响应**
+
 ```json
-// POST /v1/chat/completions
+// POST https://api.openai.com/v1/chat/completions
+// Authorization: Bearer <API_KEY>
 {
   "model": "gpt-4o",
   "messages": [
     { "role": "system", "content": "You are a helpful assistant." },
-    { "role": "user", "content": "北京今天几度？" }
-  ]
+    { "role": "user",   "content": "北京今天几度？" }
+  ],
+  "temperature": 0.7,      // 0-2，越大越发散
+  "max_tokens": 1024,      // 单次回复最大 token 数
+  "top_p": 1.0,            // nucleus sampling
+  "n": 1,                  // 返回候选数（>1 时 choices[] 会有多个独立回复）
+  "stream": false,         // true 时返回 SSE 流
+  "user": "user-123"       // 端到端追踪 ID，OpenAI 用于滥用检测
 }
 // 响应
-{ "choices": [ { "message": { "role": "assistant", "content": "..." }, "finish_reason": "stop" } ] }
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1717171717,
+  "model": "gpt-4o-2024-08-06",
+  "choices": [{
+    "index": 0,
+    "message": { "role": "assistant", "content": "北京今天 26℃，晴。" },
+    "finish_reason": "stop"   // stop / length / tool_calls / content_filter
+  }],
+  "usage": {
+    "prompt_tokens": 23,
+    "completion_tokens": 12,
+    "total_tokens": 35
+  }
+}
+```
+
+**2) 工具调用完整往返（2 次请求）**
+
+```json
+// ===== 第 1 次请求：告诉模型有哪些工具可用 =====
+// POST /v1/chat/completions
+{
+  "model": "gpt-4o",
+  "messages": [
+    { "role": "user", "content": "北京今天几度？" }
+  ],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "查询指定城市的天气",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city":  { "type": "string", "description": "城市名" },
+          "unit":  { "type": "string", "enum": ["celsius","fahrenheit"] }
+        },
+        "required": ["city"]
+      }
+    }
+  }],
+  "tool_choice": "auto"   // auto / none / {"type":"function","function":{"name":"get_weather"}}
+}
+
+// ===== 第 1 次响应：模型决定调工具 =====
+// 注意 arguments 是 JSON 字符串，不是对象！
+{
+  "choices": [{
+    "finish_reason": "tool_calls",
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_abc123",
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"city\":\"北京\",\"unit\":\"celsius\"}"   // 字符串，要 JSON.parse
+        }
+      }]
+    }
+  }]
+}
+
+// ===== 第 2 次请求：把工具执行结果回传 =====
+// （开发者自己执行 get_weather()，得到结果）
+{
+  "model": "gpt-4o",
+  "messages": [
+    { "role": "user", "content": "北京今天几度？" },
+    { "role": "assistant", "content": null,
+      "tool_calls": [{ "id": "call_abc123", "type": "function",
+        "function": { "name": "get_weather", "arguments": "{\"city\":\"北京\"}" }}] },
+    { "role": "tool", "tool_call_id": "call_abc123",   // 用 role:"tool" 回传
+      "content": "{\"temp\":26,\"unit\":\"celsius\",\"condition\":\"晴\"}" }
+  ]
+}
+
+// ===== 第 2 次响应：模型基于工具结果给最终回答 =====
+{
+  "choices": [{
+    "finish_reason": "stop",
+    "message": { "role": "assistant", "content": "北京今天 26℃，晴。" }
+  }]
+}
+```
+
+**3) SSE 流式响应（`stream: true`）**
+
+```
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1717,
+       "model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"北京"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"今天"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" 26℃"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+每个 chunk 是独立 JSON，文本增量在 `choices[0].delta.content`；首帧 `delta.role="assistant"`，末帧 `finish_reason` 有值；流结束标记 `data: [DONE]`。
+
+**4) 多模态（vision）**
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [{
+    "role": "user",
+    "content": [
+      { "type": "text",      "text": "这张图里有什么？" },
+      { "type": "image_url", "image_url": { "url": "https://example.com/cat.jpg" } }
+      // 也支持 base64： "url": "data:image/jpeg;base64,/9j/4AAQ..."
+    ]
+  }]
+}
 ```
 
 - **消息模型**：`messages[]`，角色 `system / user / assistant / tool`，system 提示词就是数组里的一条消息
@@ -239,3 +369,186 @@ flowchart LR
 5. **"上游格式"的工程含义**：LLM 应用中"上游"就是这层 wire format——它的设计决定了你的 Agent 循环怎么写（Responses 帮你省掉手写循环）、上下文怎么传（状态化 vs 无状态）、工具调用怎么解析（字符串 vs 对象）。面试时能讲清这点，就比只背 endpoint 强得多。
 
 ## 4. 关于 SSE 你了解多少? LLM 请求服务中的SSE呢?
+
+**一句话定位**
+
+> **SSE（Server-Sent Events，服务器发送事件）是 HTML5 标准里的一种服务端推送协议：客户端发一个普通 HTTP 请求，服务器用一个"永远不结束的响应"（`Content-Type: text/event-stream`）持续向客户端推数据，直到主动关闭。** 所有主流 LLM 厂商（OpenAI / Anthropic / Google Gemini / DeepSeek）的流式输出接口，底层用的都是 SSE。
+
+类比：普通 HTTP 是一次"问答"（请求 → 响应 → 断开）；SSE 是一次"打电话"（拨通后服务器一直说，客户端一直听）。
+
+**SSE 协议细节**
+
+**工作流程**
+
+1. 客户端发起 HTTP 请求（浏览器用 `EventSource`，请求头 `Accept: text/event-stream`）
+2. 服务器返回 `200 OK` + 响应头：
+   - `Content-Type: text/event-stream`（标志这是 SSE）
+   - `Cache-Control: no-cache`（禁止缓存，保证实时）
+   - `Connection: keep-alive`
+3. **连接保持打开，服务器持续推送"事件"**
+4. 事件以**两个换行符 `\n\n`** 分隔；每个事件由若干 `field: value` 行组成
+
+**事件字段**
+
+| 字段 | 作用 |
+|---|---|
+| `data:` | 数据载荷（可多行，客户端会用 `\n` 拼接；LLM 场景就是一段 JSON） |
+| `event:` | 事件类型（客户端用 `addEventListener('xx')` 监听；缺省为 `message`） |
+| `id:` | 事件序号（断线重连时通过 `Last-Event-ID` 请求头续传） |
+| `retry:` | 重连等待毫秒数（覆盖浏览器默认值） |
+| `:` | 注释行，常用于**心跳**（如 `: ping`），防止代理把空闲连接掐断 |
+
+示例：
+
+```
+id: 42
+event: update
+data: {"orderId":"ord_123","status":"shipped"}
+```
+
+**三种实时方案对比（高频考点）**
+
+| 维度 | SSE | WebSocket | 长轮询 |
+|---|---|---|---|
+| 通信方向 | **单向**（服务端→客户端） | 双向全双工 | 单向（模拟） |
+| 底层协议 | 标准 HTTP（无升级） | 独立协议（101 升级握手） | 标准 HTTP |
+| 自动重连 | **内置**（EventSource + Last-Event-ID） | 手动实现 | 手动实现 |
+| 实现复杂度 | 低（普通 HTTP 路由即可） | 高（帧、心跳、状态管理） | 中 |
+| 数据格式 | 仅文本（UTF-8） | 文本 + 二进制 | 文本/二进制 |
+| 代理/CDN 兼容 | 极好（纯 HTTP） | 部分代理需特殊配置 | 极好 |
+| HTTP/1.1 连接数限制 | 每源 6 条（HTTP/2 后消失） | 无 | 无 |
+| 水平扩展 | 容易（无状态） | 难（需 Redis 等 pub/sub 广播） | 容易 |
+
+```mermaid
+sequenceDiagram
+    participant C as "客户端"
+    participant S as "服务器"
+    C->>S: "POST /v1/chat/completions (stream:true)"
+    S-->>C: "200 OK<br/>Content-Type: text/event-stream"
+    loop "逐 token 生成"
+        S-->>C: "data: {delta:{content:你}}"
+        S-->>C: "data: {delta:{content:好}}"
+        S-->>C: "data: {delta:{content:！}}"
+    end
+    S-->>C: "data: [DONE]"
+    S-->>C: "连接关闭"
+```
+
+**LLM 为什么用 SSE 而不是 WebSocket（面试必答）**
+
+1. **天然单向**：LLM 对话是"一问一答"——客户端发一次请求，服务器持续推 token，客户端在生成期间不需要回传数据。WebSocket 的双向能力是**过度设计（over-engineering）**，多出来的复杂度是负担不是优势。
+2. **基础设施兼容**：SSE 就是普通 HTTP，能穿过所有代理、防火墙、CDN、负载均衡；WebSocket 需要 101 升级握手，部分严格代理会掐掉 ws 连接。
+3. **首 token 延迟（TTFT）**：非流式要等模型把整段生成完（可能几十秒）才返回；流式第一个 token 几百毫秒就到了，**感知速度天壤之别**，还能提前打断（AbortController）。
+4. **无状态易扩展**：断了重连就是一次新请求（幂等），不需要维护连接状态，水平扩展容易。
+5. **生态标准**：OpenAI、Anthropic、Gemini、DeepSeek 全部用 SSE，SDK（OpenAI SDK / Anthropic SDK / Vercel AI SDK）底层都在消费 SSE。
+
+**LLM 场景里 SSE 的实际形态**
+
+### ① Chat Completions（OpenAI 兼容，事实标准）
+
+**先建立心智模型：一次流式响应 = 一串"帧"**
+
+服务器不是一次性返回完整答案，而是把答案**切碎、边生成边推**。线上传输的每一"帧"就是一行 `data:` 文本，帧与帧之间用空行（`\n\n`）隔开；`[DONE]` 是最后一帧，表示流结束。
+
+```text
+data: {...第 1 帧...}
+
+data: {...第 2 帧...}
+
+data: {...第 3 帧...}
+
+data: [DONE]
+```
+
+**一次真实的完整流（带注释）**
+
+```text
+# 第 1 帧：角色帧——delta 里只有 role，声明"我开始回答了"
+data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1720000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+# 第 2 帧：内容帧——delta.content 是本帧新生成的 1 个 token
+data: {"choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}
+
+# 第 3 帧：内容帧——继续增量
+data: {"choices":[{"index":0,"delta":{"content":"好"},"finish_reason":null}]}
+
+# 第 4 帧：结束帧——delta 为空，finish_reason 变成 "stop"，告诉你"我说完了"
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+# 最后一帧：结束标记，它不是 JSON，就是个固定字符串
+data: [DONE]
+```
+
+**每一帧里的 `{...}` 就是一个 chunk（数据块）**
+
+把第 1 帧的 JSON 美化展开，逐字段看：
+
+```json
+{
+  "id": "chatcmpl-abc",                     // 与普通响应同一个会话 id
+  "object": "chat.completion.chunk",        // 注意：对象类型是 chunk（流式），不是 completion
+  "created": 1720000000,
+  "model": "gpt-4o",
+  "choices": [{
+    "index": 0,                             // 候选序号（n>1 时区分多个回答）
+    "delta": { "role": "assistant" },       // ★ 流式专有字段：本帧带来的"增量"
+    "finish_reason": null                   // 生成中为 null，结束时变为 stop/length/tool_calls
+  }]
+}
+```
+
+**核心区分：普通响应看 `message`，流式响应看 `delta`**
+
+| 对比项 | 普通响应（stream:false） | 流式响应（stream:true） |
+|---|---|---|
+| choices 里装什么 | `message`：一条**完整**消息 | `delta`：本帧的**增量** |
+| content | 一次给全的完整文本 | 只含本帧新生成的一小段 |
+| role | 每次都有 | 只有第 1 帧有，其余帧为空 |
+| 取数方式 | 直接用 | 每帧取 `delta.content` 拼接 |
+
+**帧的生命周期（背下来，面试常问）**
+
+| 阶段 | delta 内容 | finish_reason | 作用 |
+|---|---|---|---|
+| 第 1 帧 | `{"role":"assistant"}` | null | 角色帧：声明开始回答 |
+| 中间帧 | `{"content":"X"}` | null | 内容帧：每生成一段就推一帧 |
+| 末帧 | `{}` | `"stop"` | 结束帧：标记生成完成及原因 |
+| 最后一帧 | `data: [DONE]`（非 JSON） | — | 流结束标记 |
+
+**客户端拼装逻辑（增量 → 完整回答）**
+
+```text
+收到帧1: delta.content 为空        → 已拼文本 = ""
+收到帧2: delta.content = "你"      → 已拼文本 = "你"
+收到帧3: delta.content = "好"      → 已拼文本 = "你好"
+收到帧4: finish_reason = "stop"    → 生成结束
+收到帧5: [DONE]                    → 关闭连接，渲染已拼文本 "你好"
+```
+
+**工具调用时流长什么样（差异点）**
+
+模型决定调工具时，delta 里不是 content 而是 `tool_calls`，而且 **arguments 也是分片字符串**：
+
+```text
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"北京\"}"}}]},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+```
+
+客户端要做两件事：**① 把多帧的 `arguments` 碎片拼成完整字符串**（`{"city":"北京"}`）；**② 再 `JSON.parse` 成对象**才能用。`finish_reason="tool_calls"` 表示"模型不说话了，它想调工具"。
+
+**想拿 usage（token 统计）？**
+
+加参数 `stream_options: {"include_usage": true}`，usage 会出现在**最后一个 chunk**（`[DONE]` 前）里。
+
+**面试加分点（谈深度）**
+
+1. **"为什么是 SSE 不是 WebSocket"是 LLM 面试高频题**，标准答法：单向性 + HTTP 兼容 + 简单 + 生态标准，WebSocket 是过度设计。
+2. **能讲出三种流的格式差异**（Chat Completions 裸 chunk / Responses 语义事件 / Anthropic 分块生命周期），证明你真正对接过 LLM 服务，而不是只背概念。
+3. **客户端为什么用 fetch 而不是 EventSource**（POST 限制 + 自定义 header）——这题一答出来，面试官就知道你写过真实代码。
+4. **性能指标意识**：流式优化的核心指标是 **TTFT（Time To First Token，首 token 延迟）** 和 tokens/s，而不是"总耗时"。
+5. **结合上游格式**：SSE 是"传输层"，第 3 题的 wire format 是"业务层"——两者结合讲（如 Chat Completions 流式就是"delta 增量 + [DONE]"），体现体系化理解。

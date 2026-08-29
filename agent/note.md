@@ -1,6 +1,6 @@
 ### 一. 基础点
 
-#### 1. 一个例子说明 ReACT 的的经典具体实现
+#### 1. 一个例子说明 ReACT Agent 的的经典具体实现
 
 **用户问**: 2026年苹果和谷歌的市值谁更高, 差多少?
 
@@ -9,62 +9,46 @@
 1. 发给LLM的初始prompt
 2. 构建Agent的代码要遵循ReAct编排
 
-Prompt需要用来约束LLM的思考强度(不要一次性多步思考)和输出格式:
-
-```markdown
-你是一个 AI 助手，可以使用以下工具：
-- search(query): 搜索互联网获取最新信息
-- calculator(expr): 计算数学表达式
-
-回答时请严格按照以下格式：
-Thought: 你的思考过程（分析当前情况，决定下一步）
-Action: 工具名称
-Action Input: 工具的输入参数
-Observation: （此行由系统填入工具返回的结果，你不用写）
-... 以上可以重复多轮 ...
-Final Answer: 当你确定可以回答时，在这里给出最终答案
-
-问题：2024 年苹果公司的市值是多少？和谷歌相比谁更高？
-```
-
-代码要跑一个循环, 不断的 "调LLM, 检查输出, 执行工具, 填回结果":
-
 ```python
-def react_agent(question: str, tools: dict, max_steps: int = 10):
-    # 把 ReAct 格式约束和问题拼在一起，作为初始 prompt
-    prompt = build_react_prompt(question, tools)
-    # 用来存每一轮的对话历史，每次调 LLM 都把完整历史带上
-    history = []
+messages = [
+    {"role": "system", "content": system_prompt},
+    {"role": "user", "content": user_query},
+]
 
-    for _ in range(max_steps):
-        # 调 LLM，让它输出下一步的 Thought + Action
-        # 注意：每次调用都把完整历史拼进去，LLM 才知道之前做了什么
-        response = llm.generate(prompt + "\n".join(history))
+while not finished:
+    response = model.chat(
+        messages=messages,
+        tools=tool_schemas,
+    )
 
-        if "Final Answer:" in response:
-            # LLM 输出了 Final Answer，说明它判断任务完成了
-            return response.split("Final Answer:")[-1].strip()
+    if not response.tool_calls:
+        return response.content
 
-        # 从 LLM 输出里解析出 Action 名称和 Action Input
-        # 例如：Action: search，Action Input: 苹果公司市值 -> ("search", "苹果公司市值")
-        action, action_input = parse_action(response)
+    messages.append(response.message)
 
-        # 执行对应的工具，拿到真实结果
-        if action in tools:
-            observation = tools[action](action_input)
-        else:
-            # 如果 LLM 填了一个不存在的工具名，给它一个错误反馈
-            observation = f"工具 {action} 不存在，请选择可用工具"
+    for tool_call in response.tool_calls:
+        arguments = parse_json(tool_call.arguments)
+        result = execute_tool(tool_call.name, arguments)
 
-        # 把这一轮的 LLM 输出（含 Thought+Action）和 Observation 都追加进历史
-        # 下次调 LLM 时这些内容会成为它的「记忆」
-        history.append(response)
-        history.append(f"Observation: {observation}")
-
-    return "超过最大步数，任务未完成"
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": str(result),
+        })
 ```
 
-现代 LLM（GPT-4、Claude 3 之后）基本都原生支持 Function Calling / Tool Use，模型可以直接输出结构化的 JSON 工具调用，不再需要靠解析 `Action: xxx `这种文本格式。
+| 组件              | 责任                                   |
+| ----------------- | -------------------------------------- |
+| LLM               | 根据上下文决定回答还是请求调用工具     |
+| **Agent Runtime** | 维护消息、控制循环、处理错误和终止条件 |
+| Tool              | 执行模型本身无法完成的**确定性**动作   |
+| Tool Schema       | 告诉模型有哪些动作，以及需要哪些参数   |
+
+**这就是经典的ReAct风格循环**:
+$$
+Reason -> Act -> Observe -> Reason
+$$
+
 
 #### 2. RAG 的整体工作流程
 
