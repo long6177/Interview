@@ -256,8 +256,15 @@ flowchart LR
 **3) SSE 流式响应（`stream: true`）**
 
 ```
-data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1717,
-       "model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+data: {"id":"chatcmpl-abc",
+		"object":"chat.completion.chunk",
+		"created":1717,
+       	"model":"gpt-4o",
+       	"choices":[{"index":0,
+       				"delta":{"role":"assistant"},
+       				"finish_reason":null
+       			}]
+      }
 
 data: {"choices":[{"index":0,"delta":{"content":"北京"},"finish_reason":null}]}
 
@@ -464,7 +471,12 @@ data: [DONE]
 
 ```text
 # 第 1 帧：角色帧——delta 里只有 role，声明"我开始回答了"
-data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1720000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+data: {	"id":"chatcmpl-abc",
+		"object":"chat.completion.chunk",
+		"created":1720000000,
+		"model":"gpt-4o",
+		"choices":[{"index":0, "delta":{"role":"assistant"}, "finish_reason":null}]
+	}
 
 # 第 2 帧：内容帧——delta.content 是本帧新生成的 1 个 token
 data: {"choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}
